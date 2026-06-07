@@ -1,0 +1,316 @@
+ # ============================================================
+# COLLEGE WIFI SIGNAL ANALYSER
+# Run this daily, walk around college, type location names
+# Generates heatmap + trend graph + daily comparison
+# ============================================================
+
+import pywifi
+import time
+import csv
+import os
+import glob
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from datetime import datetime, timedelta
+    
+
+# ============================================================
+# FUNCTION 1 — Convert dBm to human readable label
+# ============================================================
+def signal_label(dbm):
+    if dbm >= -60:
+        return "Excellent"
+    elif dbm >= -70:
+        return "Good"
+    elif dbm >= -80:
+        return "Weak"
+    else:
+        return "Very Weak"
+
+
+# ============================================================
+# FUNCTION 2 — Convert dBm to a color for heatmap
+# ============================================================
+def signal_color(dbm):
+    if dbm >= -60:
+        return "green"
+    elif dbm >= -70:
+        return "yellowgreen"
+    elif dbm >= -80:
+        return "orange"
+    else:
+        return "red"
+
+
+# ============================================================
+# FUNCTION 3 — Scan WiFi at current location
+# ============================================================
+def scan_wifi(location):
+    wifi = pywifi.PyWiFi()
+    iface = wifi.interfaces()[0]
+
+    iface.scan()
+    print("📡 Scanning... please wait 3 seconds")
+    time.sleep(3)
+
+    results = iface.scan_results()
+
+    # Remove duplicates and blank names — keep strongest signal
+    seen = {}
+    for network in results:
+        name = network.ssid.strip()
+        if name and (name not in seen or network.signal > seen[name]):
+            seen[name] = network.signal
+
+    print(f"\nNetworks found at {location}:")
+    for name, signal in seen.items():
+        print(f"  {name}  |  {signal} dBm  |  {signal_label(signal)}")
+
+    return seen
+
+
+# ============================================================
+# FUNCTION 4 — Save scan data to CSV file
+# ============================================================
+def save_to_csv(all_scans, filename):
+    with open(filename, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["location", "network", "signal_dbm", "quality", "time"])
+        writer.writeheader()
+        writer.writerows(all_scans)
+    print(f"\n📄 Data saved to: {filename}")
+
+
+# ============================================================
+# FUNCTION 5 — Read a CSV file and return scan data
+# ============================================================
+def read_csv(filename):
+    data = []
+    with open(filename, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row["signal_dbm"] = int(row["signal_dbm"])
+            data.append(row)
+    return data
+
+
+# ============================================================
+# FUNCTION 6 — Compare today vs yesterday
+# ============================================================
+def daily_comparison(today_scans, yesterday_filename):
+    if not os.path.exists(yesterday_filename):
+        print("\n📅 No yesterday data found — skipping comparison.")
+        return
+
+    yesterday_scans = read_csv(yesterday_filename)
+
+    # Get best signal per location for yesterday
+    yesterday_best = {}
+    for scan in yesterday_scans:
+        loc = scan["location"]
+        sig = scan["signal_dbm"]
+        if loc not in yesterday_best or sig > yesterday_best[loc]:
+            yesterday_best[loc] = sig
+
+    # Get best signal per location for today
+    today_best = {}
+    for scan in today_scans:
+        loc = scan["location"]
+        sig = scan["signal_dbm"]
+        if loc not in today_best or sig > today_best[loc]:
+            today_best[loc] = sig
+
+    print("\n" + "="*50)
+    print("📊 TODAY VS YESTERDAY")
+    print("="*50)
+
+    for loc in today_best:
+        if loc in yesterday_best:
+            today_sig     = today_best[loc]
+            yesterday_sig = yesterday_best[loc]
+            diff          = today_sig - yesterday_sig
+
+            if diff > 3:
+                print(f"✅  {loc}: BETTER today ({yesterday_sig} → {today_sig} dBm)")
+            elif diff < -3:
+                print(f"⚠️  {loc}: WORSE today ({yesterday_sig} → {today_sig} dBm)")
+            else:
+                print(f"➡️  {loc}: About the same ({today_sig} dBm)")
+        else:
+            print(f"🆕  {loc}: New location, no previous data")
+
+    print("="*50)
+
+
+# ============================================================
+# FUNCTION 7 — Generate heatmap image
+# ============================================================
+def generate_heatmap(all_scans, filename):
+    # Get best signal per location
+    best_per_location = {}
+    for scan in all_scans:
+        loc = scan["location"]
+        sig = scan["signal_dbm"]
+        if loc not in best_per_location or sig > best_per_location[loc]:
+            best_per_location[loc] = sig
+
+    locations = list(best_per_location.keys())
+    signals   = list(best_per_location.values())
+    colors    = [signal_color(s) for s in signals]
+    labels    = [signal_label(s) for s in signals]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    bars = ax.barh(locations, signals, color=colors, edgecolor="black", height=0.5)
+
+    for bar, label, signal in zip(bars, labels, signals):
+        ax.text(signal + 1, bar.get_y() + bar.get_height() / 2,
+                f"{label} ({signal} dBm)", va="center", fontsize=9)
+
+    ax.set_xlabel("Signal Strength (dBm)  ←  Weaker          Stronger  →")
+    ax.set_title(f"📶 College WiFi Heatmap — {datetime.now().strftime('%Y-%m-%d')}", fontsize=14, fontweight="bold")
+    ax.set_xlim(-100, -40)
+    ax.invert_xaxis()
+
+    legend = [
+        mpatches.Patch(color="green",        label="Excellent (above -60)"),
+        mpatches.Patch(color="yellowgreen",   label="Good (-60 to -70)"),
+        mpatches.Patch(color="orange",        label="Weak (-70 to -80)"),
+        mpatches.Patch(color="red",           label="Very Weak (below -80)"),
+    ]
+    ax.legend(handles=legend, loc="lower right", fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
+    print(f"🖼️  Heatmap saved to: {filename}")
+
+
+# ============================================================
+# FUNCTION 8 — Generate 7 day trend graph for one location
+# ============================================================
+def generate_trend_graph(location_name):
+    dates   = []
+    signals = []
+
+    # Look back 7 days
+    for i in range(6, -1, -1):
+        date      = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        csv_file  = f"scan_{date}.csv"
+
+        if os.path.exists(csv_file):
+            data = read_csv(csv_file)
+            best = None
+            for row in data:
+                if row["location"].lower() == location_name.lower():
+                    if best is None or row["signal_dbm"] > best:
+                        best = row["signal_dbm"]
+            if best is not None:
+                dates.append(date)
+                signals.append(best)
+
+    if len(dates) < 2:
+        print(f"\n📅 Not enough data yet for a trend graph for '{location_name}'.")
+        print("   Keep scanning daily — trend graph will appear after 2+ days.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.plot(dates, signals, marker="o", color="steelblue", linewidth=2, markersize=8)
+
+    for x, y in zip(dates, signals):
+        ax.annotate(f"{y} dBm", (x, y), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=8)
+
+    ax.set_title(f"📈 7-Day WiFi Trend — {location_name}", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Signal Strength (dBm)")
+    ax.set_ylim(-100, -40)
+    ax.invert_yaxis()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    trend_filename = f"trend_{location_name}_{datetime.now().strftime('%Y-%m-%d')}.png"
+    plt.savefig(trend_filename)
+    plt.close()
+
+    print(f"📈 Trend graph saved to: {trend_filename}")
+
+
+
+# ============================================================
+# MAIN PROGRAM
+# ============================================================
+def main():
+    print("="*50)
+    print("   📡 COLLEGE WIFI SIGNAL ANALYSER")
+    print("="*50)
+    print("Walk to each area and scan. Type location name when asked.\n")
+
+    today          = datetime.now().strftime("%Y-%m-%d")
+    yesterday      = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    csv_filename   = f"scan_{today}.csv"
+    heatmap_file   = f"heatmap_{today}.png"
+    yesterday_file = f"scan_{yesterday}.csv"
+
+    all_scans = []
+
+     # Keep scanning until user says no
+    while True:
+        location = input("\nEnter location name (e.g. Library, Canteen, Block A): ").strip()
+
+        if not location:
+            print("⚠️  Location name cannot be empty. Try again.")
+            continue
+
+        seen = scan_wifi(location)
+
+        for name, signal in seen.items():
+            all_scans.append({
+                "location":   location,
+                "network":    name,
+                "signal_dbm": signal,
+                "quality":    signal_label(signal),
+                "time":       datetime.now().strftime("%Y-%m-%d %H:%M")
+            })
+
+        another = input("\nScan another location? (yes/no): ").strip().lower()
+        if another != "yes":
+            break
+
+    if not all_scans:
+        print("\n⚠️  No data collected. Exiting.")
+        return
+
+    # Save data
+    save_to_csv(all_scans, csv_filename)
+
+    # Generate heatmap
+    generate_heatmap(all_scans, heatmap_file)
+
+    # Daily comparison
+    daily_comparison(all_scans, yesterday_file)
+
+    # Show best and worst spot
+    best  = max(all_scans, key=lambda x: x["signal_dbm"])
+    worst = min(all_scans, key=lambda x: x["signal_dbm"])
+
+    print("\n" + "="*50)
+    print("📊 TODAY'S BEST AND WORST")
+    print("="*50)
+    print(f"📶 Best spot   : {best['location']} ({best['signal_dbm']} dBm) {best['quality']}")
+    print(f"🚫 Worst spot  : {worst['location']} ({worst['signal_dbm']} dBm) {worst['quality']}")
+    print("="*50)
+
+    # Trend graph — ask which location to plot
+    print("\nWould you like a 7-day trend graph for any location?")
+    trend_location = input("Type location name (or press Enter to skip): ").strip()
+    if trend_location:
+        generate_trend_graph(trend_location)
+
+    print(f"\n✅ All done! Open your heatmap:")
+    print(f"   start {heatmap_file}")
+
+
+# Run the program
+if __name__ == "__main__":
+    main()
