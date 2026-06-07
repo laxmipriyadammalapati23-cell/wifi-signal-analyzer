@@ -14,5 +14,6 @@ ECE Undergraduate
 - Fire Detection System
 
 ## Contact
-LinkedIn: ...
-Email: ...fi-signal-analyzer
+LinkedIn:http://www.linledin.com/in/laxmipriya-dammalapati
+Email: laxmipriyadammalapati23@gmail.com
+
